@@ -1,7 +1,7 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
+use crate::config::{BIG_STRIDE, TRAP_CONTEXT_BASE};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
@@ -68,6 +68,15 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Priority asked for through `set_priority`, one being an even share
+    pub priority: usize,
+
+    /// Virtual time this task owes the scheduler for one dispatch
+    pub stride: usize,
+
+    /// Virtual time this task has already been charged
+    pub pass: usize,
 }
 
 impl TaskControlBlockInner {
@@ -118,6 +127,9 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    priority: 1,
+                    stride: BIG_STRIDE,
+                    pass: 0,
                 })
             },
         };
@@ -176,6 +188,12 @@ impl TaskControlBlock {
         let pid_handle = pid_alloc();
         let kernel_stack = kstack_alloc();
         let kernel_stack_top = kernel_stack.get_top();
+        // a child inherits the standing its parent had reached in the scheduler
+        let (priority, stride, pass) = (
+            parent_inner.priority,
+            parent_inner.stride,
+            parent_inner.pass,
+        );
         let task_control_block = Arc::new(TaskControlBlock {
             pid: pid_handle,
             kernel_stack,
@@ -191,6 +209,9 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    priority,
+                    stride,
+                    pass,
                 })
             },
         });
@@ -209,6 +230,19 @@ impl TaskControlBlock {
     /// get pid of process
     pub fn getpid(&self) -> usize {
         self.pid.0
+    }
+
+    /// Re-price the task in the stride scheduler.
+    ///
+    /// A priority of `p` is charged [`BIG_STRIDE`]` / p` virtual time per
+    /// dispatch instead of the whole [`BIG_STRIDE`], so it is picked about `p`
+    /// times as often. The division is floored at one: `set_priority` accepts
+    /// huge priorities, and a charge of zero would freeze the task's pass and
+    /// hand it the processor for good.
+    pub fn set_priority(&self, priority: usize) {
+        let mut inner = self.inner_exclusive_access();
+        inner.priority = priority;
+        inner.stride = (BIG_STRIDE / priority).max(1);
     }
 
     /// change the location of the program break. return None if failed.

@@ -72,6 +72,61 @@ impl MemorySet {
             self.areas.remove(idx);
         }
     }
+    /// Is every page of `[start_va, end_va)` still unmapped?
+    ///
+    /// [`MemorySet::insert_framed_area`] assumes it is and asserts on a page it
+    /// would shadow, so a request that comes from user space has to be asked
+    /// first. A page counts as taken as soon as its entry carries the valid
+    /// bit, whether or not the walk reaches that far.
+    pub fn is_range_free(&self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        VPNRange::new(start_va.floor(), end_va.ceil())
+            .into_iter()
+            .all(|vpn| {
+                self.page_table
+                    .translate(vpn)
+                    .filter(|pte| pte.is_valid())
+                    .is_none()
+            })
+    }
+    /// Tear the mapping of `[start_va, end_va)` down and hand the frames back.
+    ///
+    /// Only whole [`MapArea`]s are dropped: a partially freed area would keep
+    /// pages alive that the caller believes are gone, and it would leave a hole
+    /// that [`MemorySet::from_existed_user`] cannot copy when the process forks.
+    /// A range with pages that belong to no area at all is refused for the same
+    /// reason — reporting success for half a teardown would be a lie.
+    pub fn unmap_range(&mut self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let from = start_va.floor();
+        let to = end_va.ceil();
+        if from >= to {
+            return false;
+        }
+        let mut inside: Vec<usize> = Vec::new();
+        for (idx, area) in self.areas.iter().enumerate() {
+            let begin = area.vpn_range.get_start();
+            let end = area.vpn_range.get_end();
+            if begin >= from && end <= to {
+                inside.push(idx);
+            } else if begin < to && end > from {
+                return false;
+            }
+        }
+        let pages: usize = inside
+            .iter()
+            .map(|&idx| {
+                let area = &self.areas[idx];
+                area.vpn_range.get_end().0 - area.vpn_range.get_start().0
+            })
+            .sum();
+        if pages != to.0 - from.0 {
+            return false;
+        }
+        for idx in inside.into_iter().rev() {
+            self.areas[idx].unmap(&mut self.page_table);
+            self.areas.remove(idx);
+        }
+        true
+    }
     /// Add a new MapArea into this MemorySet.
     /// Assuming that there are no conflicts in the virtual address
     /// space.

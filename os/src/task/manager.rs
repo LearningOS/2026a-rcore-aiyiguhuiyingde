@@ -9,7 +9,7 @@ pub struct TaskManager {
     ready_queue: VecDeque<Arc<TaskControlBlock>>,
 }
 
-/// A simple FIFO scheduler.
+/// The ready queue, served in order of virtual time spent.
 impl TaskManager {
     ///Creat an empty TaskManager
     pub fn new() -> Self {
@@ -21,9 +21,27 @@ impl TaskManager {
     pub fn add(&mut self, task: Arc<TaskControlBlock>) {
         self.ready_queue.push_back(task);
     }
-    /// Take a process out of the ready queue
+    /// Take the task that has been charged the least virtual time.
+    ///
+    /// Every task carries a `pass` and a `stride`, the price of one dispatch.
+    /// Taking the smallest `pass` and billing it straight away is stride
+    /// scheduling measured in dispatches instead of ticks: a task that has
+    /// asked for priority `p` pays `1/p` of the charge, so its pass climbs
+    /// `p` times more slowly and it is picked roughly `p` times as often,
+    /// while everyone else keeps making progress.
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        self.ready_queue.pop_front()
+        let mut best: Option<(usize, usize)> = None;
+        for (idx, task) in self.ready_queue.iter().enumerate() {
+            let pass = task.inner_exclusive_access().pass;
+            if best.map_or(true, |(_, lowest)| pass < lowest) {
+                best = Some((idx, pass));
+            }
+        }
+        let (idx, _) = best?;
+        let task = self.ready_queue.remove(idx).unwrap();
+        let stride = task.inner_exclusive_access().stride;
+        task.inner_exclusive_access().pass += stride;
+        Some(task)
     }
 }
 

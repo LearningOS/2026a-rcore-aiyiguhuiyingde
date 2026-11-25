@@ -19,5 +19,9 @@ pub const TRAMPOLINE: usize = usize::MAX - PAGE_SIZE + 1;
 pub const TRAP_CONTEXT_BASE: usize = TRAMPOLINE - PAGE_SIZE;
 /// clock frequency
 pub const CLOCK_FREQ: usize = 12500000;
+/// Virtual time a priority-one task is charged for one dispatch. The stride
+/// scheduler divides it by the priority, so it must stay well above the range
+/// of the priorities user space can ask for.
+pub const BIG_STRIDE: usize = 1 << 20;
 /// the physical memory end
 pub const MEMORY_END: usize = 0x88000000;
