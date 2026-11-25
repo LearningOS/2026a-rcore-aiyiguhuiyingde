@@ -1,6 +1,8 @@
 //! File and filesystem-related syscalls
-use crate::fs::{open_file, OpenFlags, Stat};
-use crate::mm::{translated_byte_buffer, translated_str, UserBuffer};
+use alloc::sync::Arc;
+
+use crate::fs::{link_file, open_file, unlink_file, OpenFlags, Stat};
+use crate::mm::{translated_byte_buffer, translated_refmut, translated_str, UserBuffer};
 use crate::task::{current_task, current_user_token};
 
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
@@ -75,29 +77,68 @@ pub fn sys_close(fd: usize) -> isize {
     0
 }
 
-/// YOUR JOB: Implement fstat.
-pub fn sys_fstat(_fd: usize, _st: *mut Stat) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_fstat NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+/// Report the metadata of an open file through its descriptor.
+///
+/// An fd is the whole argument here, so a descriptor that is out of range or
+/// left over by `close` is refused, and so is stdin or stdout: they are not on
+/// the disk and have nothing to report.
+pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
+    trace!("kernel:pid[{}] sys_fstat", current_task().unwrap().pid.0);
+    let file = {
+        let task = current_task().unwrap();
+        let inner = task.inner_exclusive_access();
+        match inner.fd_table.get(fd).and_then(|slot| slot.as_ref()) {
+            Some(file) => Arc::clone(file),
+            None => return -1,
+        }
+    };
+    let stat = match file.stat() {
+        Some(stat) => stat,
+        None => return -1,
+    };
+    // A stack variable of eighty bytes may well sit with part of itself in
+    // one page and part in the next, and the two frames behind them need not
+    // be neighbours, so every byte is walked through the page table by itself.
+    let token = current_user_token();
+    let src = &stat as *const Stat as *const u8;
+    let dst = st as *mut u8;
+    for i in 0..core::mem::size_of::<Stat>() {
+        unsafe {
+            *translated_refmut(token, dst.add(i)) = *src.add(i);
+        }
+    }
+    0
 }
 
-/// YOUR JOB: Implement linkat.
-pub fn sys_linkat(_old_name: *const u8, _new_name: *const u8) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_linkat NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+/// Name an existing file a second time.
+///
+/// `-1` answers for a target that does not exist, a target that is a
+/// directory, and a new name that is already taken.
+pub fn sys_linkat(old_name: *const u8, new_name: *const u8) -> isize {
+    trace!("kernel:pid[{}] sys_linkat", current_task().unwrap().pid.0);
+    let token = current_user_token();
+    let old_name = translated_str(token, old_name);
+    let new_name = translated_str(token, new_name);
+    // user_lib passes AT_FDCWD in front of every name, which is the root
+    // directory this kernel has, so the names are used as they stand.
+    if link_file(old_name.as_str(), new_name.as_str()) {
+        0
+    } else {
+        -1
+    }
 }
 
-/// YOUR JOB: Implement unlinkat.
-pub fn sys_unlinkat(_name: *const u8) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_unlinkat NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+/// Remove one name from the root directory.
+///
+/// A name that is not there is an error; a name that is there loses the entry
+/// and one link of the inode behind it, and the file disappears with its last
+/// name, which is what an open descriptor never has to care about.
+pub fn sys_unlinkat(name: *const u8) -> isize {
+    trace!("kernel:pid[{}] sys_unlinkat", current_task().unwrap().pid.0);
+    let name = translated_str(current_user_token(), name);
+    if unlink_file(name.as_str()) {
+        0
+    } else {
+        -1
+    }
 }

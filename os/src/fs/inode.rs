@@ -4,7 +4,7 @@
 //!
 //! `UPSafeCell<OSInodeInner>` -> `OSInode`: for static `ROOT_INODE`,we
 //! need to wrap `OSInodeInner` into `UPSafeCell`
-use super::File;
+use super::{File, Stat, StatMode};
 use crate::drivers::BLOCK_DEVICE;
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
@@ -125,6 +125,27 @@ pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
     }
 }
 
+/// Give an existing file a second name.
+///
+/// The namespace is a single flat directory, so `old_name` is looked up in
+/// the root and handed to the easy-fs `Inode::link`, which holds the disk lock
+/// while it checks that the new name is still free.
+pub fn link_file(old_name: &str, new_name: &str) -> bool {
+    match ROOT_INODE.find(old_name) {
+        Some(target) => ROOT_INODE.link(new_name, &target),
+        None => false,
+    }
+}
+
+/// Drop one name of a file.
+///
+/// The file itself survives its names, not the other way round: easy-fs only
+/// releases the inode and its data blocks once the last name is gone, so this
+/// is the whole of what `unlink` has to do.
+pub fn unlink_file(name: &str) -> bool {
+    ROOT_INODE.unlink(name)
+}
+
 impl File for OSInode {
     fn readable(&self) -> bool {
         self.readable
@@ -155,5 +176,28 @@ impl File for OSInode {
             total_write_size += write_size;
         }
         total_write_size
+    }
+    /// Ask the disk what the file is right now.
+    ///
+    /// Nothing is cached here on purpose: an entry opened before another task
+    /// linked or unlinked the file has to report the link count the user is
+    /// looking for, not the one that happened to be true when `open` ran.
+    /// `dev` is a constant because there is a single disk, and `ino` is the
+    /// number the easy-fs inode was created with, which two names of one file
+    /// necessarily agree on.
+    fn stat(&self) -> Option<Stat> {
+        let inner = self.inner.exclusive_access();
+        let mode = if inner.inode.is_directory() {
+            StatMode::DIR
+        } else {
+            StatMode::FILE
+        };
+        Some(Stat {
+            dev: 0,
+            ino: inner.inode.inode_id() as u64,
+            mode,
+            nlink: inner.inode.link_count(),
+            pad: [0; 7],
+        })
     }
 }

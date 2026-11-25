@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use spin::{Mutex, MutexGuard};
 /// Virtual filesystem layer over easy-fs
 pub struct Inode {
+    id: u32,
     block_id: usize,
     block_offset: usize,
     fs: Arc<Mutex<EasyFileSystem>>,
@@ -17,17 +18,31 @@ pub struct Inode {
 impl Inode {
     /// Create a vfs inode
     pub fn new(
+        id: u32,
         block_id: u32,
         block_offset: usize,
         fs: Arc<Mutex<EasyFileSystem>>,
         block_device: Arc<dyn BlockDevice>,
     ) -> Self {
         Self {
+            id,
             block_id: block_id as usize,
             block_offset,
             fs,
             block_device,
         }
+    }
+    /// The inode number this handle stands for
+    pub fn inode_id(&self) -> u32 {
+        self.id
+    }
+    /// How many names in the directory tree point at this inode right now
+    pub fn link_count(&self) -> u32 {
+        self.read_disk_inode(|disk_inode| disk_inode.nlink)
+    }
+    /// Whether this inode is a directory
+    pub fn is_directory(&self) -> bool {
+        self.read_disk_inode(|disk_inode| disk_inode.is_dir())
     }
     /// Call a function over a disk inode to read it
     fn read_disk_inode<V>(&self, f: impl FnOnce(&DiskInode) -> V) -> V {
@@ -65,6 +80,7 @@ impl Inode {
             self.find_inode_id(name, disk_inode).map(|inode_id| {
                 let (block_id, block_offset) = fs.get_disk_inode_pos(inode_id);
                 Arc::new(Self::new(
+                    inode_id,
                     block_id,
                     block_offset,
                     self.fs.clone(),
@@ -131,12 +147,118 @@ impl Inode {
         block_cache_sync_all();
         // return inode
         Some(Arc::new(Self::new(
+            new_inode_id,
             block_id,
             block_offset,
             self.fs.clone(),
             self.block_device.clone(),
         )))
         // release efs lock automatically by compiler
+    }
+    /// Give `target`, which already lives in this directory, one more name.
+    ///
+    /// The two refusals a plain [`Inode::create`] never has to make are made
+    /// here, and with the filesystem lock held so that no other task can slip
+    /// a name in between: directories are refused to keep the tree acyclic,
+    /// and a name that is already taken is refused because two entries
+    /// arguing over one inode would break unlink. The entry is then appended
+    /// exactly the way `create` appends one. Nothing else about `target` is
+    /// touched, so both names share its data, its size and every later change.
+    pub fn link(&self, new_name: &str, target: &Arc<Inode>) -> bool {
+        if target.is_directory() {
+            return false;
+        }
+        let mut fs = self.fs.lock();
+        let taken = self.read_disk_inode(|disk_inode| self.find_inode_id(new_name, disk_inode));
+        if taken.is_some() {
+            return false;
+        }
+        self.modify_disk_inode(|dir_inode| {
+            let file_count = (dir_inode.size as usize) / DIRENT_SZ;
+            let new_size = (file_count + 1) * DIRENT_SZ;
+            self.increase_size(new_size as u32, dir_inode, &mut fs);
+            let dirent = DirEntry::new(new_name, target.id);
+            dir_inode.write_at(
+                file_count * DIRENT_SZ,
+                dirent.as_bytes(),
+                &self.block_device,
+            );
+        });
+        target.modify_disk_inode(|disk_inode| disk_inode.nlink += 1);
+        block_cache_sync_all();
+        true
+    }
+    /// Remove one name from this directory.
+    ///
+    /// A name the directory does not have is reported as `false`. Otherwise
+    /// the entry is filled with the directory's last entry — the order of the
+    /// entries means nothing here, so shifting the whole table down to close
+    /// the gap would buy nothing — and the size shrinks by one entry, which
+    /// hands back the data block if that left one empty. The inode behind the
+    /// name then loses one link, and once nothing points at it its data
+    /// blocks and its inode number go back to the bitmaps. That last step is
+    /// what keeps a create/unlink loop from running the disk out.
+    pub fn unlink(&self, name: &str) -> bool {
+        let mut fs = self.fs.lock();
+        let located = self.read_disk_inode(|dir_inode| {
+            let file_count = (dir_inode.size as usize) / DIRENT_SZ;
+            let mut dirent = DirEntry::empty();
+            (0..file_count).find_map(|idx| {
+                dir_inode.read_at(idx * DIRENT_SZ, dirent.as_bytes_mut(), &self.block_device);
+                if dirent.name() == name {
+                    Some((idx, dirent.inode_id()))
+                } else {
+                    None
+                }
+            })
+        });
+        let (slot, victim_id) = match located {
+            Some(found) => found,
+            None => return false,
+        };
+        let emptied = self.modify_disk_inode(|dir_inode| {
+            let last = (dir_inode.size as usize) / DIRENT_SZ - 1;
+            if slot != last {
+                let mut tail = DirEntry::empty();
+                dir_inode.read_at(last * DIRENT_SZ, tail.as_bytes_mut(), &self.block_device);
+                dir_inode.write_at(slot * DIRENT_SZ, tail.as_bytes(), &self.block_device);
+            }
+            let blocks_before = dir_inode.data_blocks();
+            dir_inode.size -= DIRENT_SZ as u32;
+            let mut freed: Vec<u32> = Vec::new();
+            for idx in (dir_inode.data_blocks()..blocks_before).rev() {
+                if let Some(pointer) = dir_inode.direct.get_mut(idx as usize) {
+                    if *pointer != 0 {
+                        freed.push(*pointer);
+                        *pointer = 0;
+                    }
+                }
+            }
+            freed
+        });
+        for block_id in emptied {
+            fs.dealloc_data(block_id);
+        }
+        let (block_id, block_offset) = fs.get_disk_inode_pos(victim_id);
+        let (gone, blocks) = get_block_cache(block_id as usize, Arc::clone(&self.block_device))
+            .lock()
+            .modify(block_offset, |disk_inode: &mut DiskInode| {
+                assert!(disk_inode.nlink > 0, "a named inode with no links");
+                disk_inode.nlink -= 1;
+                if disk_inode.nlink == 0 {
+                    (true, disk_inode.clear_size(&self.block_device))
+                } else {
+                    (false, Vec::new())
+                }
+            });
+        for block_id in blocks {
+            fs.dealloc_data(block_id);
+        }
+        if gone {
+            fs.dealloc_inode(victim_id);
+        }
+        block_cache_sync_all();
+        true
     }
     /// List inodes under current inode
     pub fn ls(&self) -> Vec<String> {

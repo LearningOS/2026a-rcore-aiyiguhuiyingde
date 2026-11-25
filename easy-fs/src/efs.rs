@@ -29,8 +29,12 @@ impl EasyFileSystem {
         // calculate block size of areas & create bitmaps
         let inode_bitmap = Bitmap::new(1, inode_bitmap_blocks as usize);
         let inode_num = inode_bitmap.maximum();
+        // The area is sized in whole blocks because [`EasyFileSystem::get_disk_inode_pos`]
+        // never splits an inode across two of them, so whatever is left over at the
+        // end of a block counts as spent.
+        let inodes_per_block = BLOCK_SZ / core::mem::size_of::<DiskInode>();
         let inode_area_blocks =
-            ((inode_num * core::mem::size_of::<DiskInode>() + BLOCK_SZ - 1) / BLOCK_SZ) as u32;
+            ((inode_num + inodes_per_block - 1) / inodes_per_block) as u32;
         let inode_total_blocks = inode_bitmap_blocks + inode_area_blocks;
         let data_total_blocks = total_blocks - 1 - inode_total_blocks;
         let data_bitmap_blocks = (data_total_blocks + 4096) / 4097;
@@ -109,7 +113,7 @@ impl EasyFileSystem {
         // acquire efs lock temporarily
         let (block_id, block_offset) = efs.lock().get_disk_inode_pos(0);
         // release efs lock
-        Inode::new(block_id, block_offset, Arc::clone(efs), block_device)
+        Inode::new(0, block_id, block_offset, Arc::clone(efs), block_device)
     }
     /// Get inode by id
     pub fn get_disk_inode_pos(&self, inode_id: u32) -> (u32, usize) {
@@ -128,6 +132,11 @@ impl EasyFileSystem {
     /// Allocate a new inode
     pub fn alloc_inode(&mut self) -> u32 {
         self.inode_bitmap.alloc(&self.block_device).unwrap() as u32
+    }
+    /// Give an inode number back to the inode bitmap
+    pub fn dealloc_inode(&mut self, inode_id: u32) {
+        self.inode_bitmap
+            .dealloc(&self.block_device, inode_id as usize);
     }
 
     /// Allocate a data block

@@ -86,6 +86,12 @@ pub struct DiskInode {
     pub indirect1: u32,
     pub indirect2: u32,
     type_: DiskInodeType,
+    /// How many directory entries name this inode.
+    ///
+    /// A hard link is nothing more than a second entry pointing here, so the
+    /// count lives on the inode and not in the directories that hold the
+    /// names. The file is dropped from the disk when the count falls to zero.
+    pub nlink: u32,
 }
 
 impl DiskInode {
@@ -97,6 +103,8 @@ impl DiskInode {
         self.indirect1 = 0;
         self.indirect2 = 0;
         self.type_ = type_;
+        // The entry that names the file is the link we are counting.
+        self.nlink = 1;
     }
     /// Whether this inode is a directory
     pub fn is_dir(&self) -> bool {
