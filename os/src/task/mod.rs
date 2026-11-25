@@ -10,6 +10,7 @@
 //! might not be what you expect.
 
 mod context;
+mod deadlock;
 mod id;
 mod manager;
 mod process;
@@ -30,6 +31,10 @@ use process::ProcessControlBlock;
 use switch::__switch;
 
 pub use context::TaskContext;
+pub use deadlock::{
+    forget, grant, hand_over, release, request_would_deadlock, set_detection, set_waiting,
+    ResourceId,
+};
 pub use id::{kstack_alloc, pid_alloc, KernelStack, PidHandle, IDLE_PID};
 pub use manager::{add_task, pid2process, remove_from_pid2process, remove_task, wakeup_task};
 pub use processor::{
@@ -84,9 +89,10 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // record exit code
     task_inner.exit_code = Some(exit_code);
     task_inner.res = None;
+    drop(task_inner);
+    forget(&task);
     // here we do not remove the thread since we are still using the kstack
     // it will be deallocated when sys_waittid is called
-    drop(task_inner);
 
     // Move the task to stop-wait status, to avoid kernel stack from being freed
     if tid == 0 {
