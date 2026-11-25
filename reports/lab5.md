@@ -119,3 +119,19 @@ struct ThreadSnapshot { tid, held: Vec<ResourceId>, blocked_on: Option<ResourceI
 ## 5. 复跑记录
 
 判分读数与报告闸结果在本节补记：`Test passedNNN: n/25`、`Report for lab1..lab5 found.`、`MAKE_RC=`。
+
+- `bash rig_c2_run.sh ch8 docs1` → `Test passedNNN: 23/25`，缺
+  `deadlock test semaphore 1 OK!` / `deadlock test semaphore 2 OK!`，`MAKE_RC=2`（qemu 被 30s
+  `timeout` 杀掉，`make[1]: *** [run] Error 124`）。
+- 中间四轮插桩（`dbg1`..`dbg4`）把 `[DN]`/`[UP]` 按 pid+tid 打全，读数说明信号量图与唤醒簿记都对：
+  pid=15（sem1）主线程 3 次 `down(0)` 把 barrier 清零、3 个子线程各自拿到资源后阻塞在
+  `down(0)` 且 `deadly=false`；pid=16（sem2）主线程 4 次 `down(0)`、4 个子线程同样阻塞——
+  但整个日志里没有一条 `pid=15/16` 的 `[UP]`，即主线程从未走到 `semaphore_up(SEM_BARRIER)`。
+  顺着 `user/src/lib.rs:263` 查到 `sleep()` 是 `get_time()` + `sys_yield()` 的用户态忙等，
+  而本章骨架把 `sys_get_time` 留成返回 `-1` 的桩：`get_time()` 恒为 `-1`，
+  `while get_time() < start + 500` 永真，主线程就在 yield 循环里跑到超时。
+  所以缺的 2 条判决与死锁算法无关，是 `syscall/process.rs` 的 `sys_get_time` 没实现。
+- 补上 `sys_get_time`（按字节走页表写回 `TimeVal`，兼容跨页）后复跑
+  `bash rig_c2_run.sh ch8 gt1` → `Test passed52130: 25/25`、
+  `Report for lab1 found.` / `lab2` / `lab3` / `lab4` / `lab5` 全在、`MAKE_RC=0`。
+  `python3 rig_c2_gaps.py ch8` → 需补齐=0、不该出现却出现了=0。插桩已全部 `git checkout --` 撤净。

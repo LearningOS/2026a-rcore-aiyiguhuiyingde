@@ -8,6 +8,8 @@ use crate::{
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
 
+use crate::timer::get_time_us;
+
 #[repr(C)]
 #[derive(Debug)]
 pub struct TimeVal {
@@ -148,15 +150,21 @@ pub fn sys_kill(pid: usize, signal: u32) -> isize {
 
 /// get_time syscall
 ///
-/// YOUR JOB: get time with second and microsecond
-/// HINT: You might reimplement it with virtual memory management.
-/// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
-        current_task().unwrap().process.upgrade().unwrap().getpid()
-    );
-    -1
+/// Stamps the caller's [`TimeVal`] with the current wall clock. The struct is
+/// sixteen bytes, so it may straddle a page boundary; stepping one byte at a
+/// time through the page table keeps the two halves independent.
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
+    let us = get_time_us();
+    let word = core::mem::size_of::<usize>();
+    let mut raw = [0u8; 2 * core::mem::size_of::<usize>()];
+    raw[..word].copy_from_slice(&(us / 1_000_000).to_ne_bytes());
+    raw[word..].copy_from_slice(&(us % 1_000_000).to_ne_bytes());
+    let token = current_user_token();
+    let base = ts as *mut u8;
+    for (offset, byte) in raw.iter().enumerate() {
+        *translated_refmut(token, unsafe { base.add(offset) }) = *byte;
+    }
+    0
 }
 
 /// mmap syscall
