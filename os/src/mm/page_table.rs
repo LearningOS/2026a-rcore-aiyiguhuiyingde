@@ -1,6 +1,7 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
 
 use super::{frame_alloc, FrameTracker, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
+use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
 use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::*;
@@ -151,10 +152,113 @@ impl PageTable {
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
         self.find_pte(vpn).map(|pte| *pte)
     }
+    /// The leaf entry of `vpn` only counts as a mapping when it is valid: after
+    /// `sys_munmap` the entry is zeroed but its parent tables survive, so a bare
+    /// `translate(..).is_some()` would report freed pages as still mapped.
+    pub fn is_mapped(&self, vpn: VirtPageNum) -> bool {
+        matches!(self.translate(vpn), Some(pte) if pte.is_valid())
+    }
+    /// Walk `va` down to the physical frame holding it, rejecting an address
+    /// whose walk stops early or whose leaf entry is not valid.
+    fn fetch_frame(&self, va: VirtAddr) -> Option<(PhysPageNum, PTEFlags)> {
+        let pte = self.translate(va.floor())?;
+        if !pte.is_valid() {
+            return None;
+        }
+        Some((pte.ppn(), pte.flags()))
+    }
     /// get the token from the page table
     pub fn token(&self) -> usize {
         8usize << 60 | self.root_ppn.0
     }
+}
+
+/// Upper bound of the SV39 user half (`PAGE_SIZE_BITS + VPN_WIDTH_SV39` bits of
+/// address): `[0, 2^38)` is what a U-mode program may own, everything above
+/// belongs to the kernel and must never be reachable from a syscall argument.
+const USER_VA_LIMIT: usize = 1 << (PAGE_SIZE_BITS + 27);
+
+/// Is `[start, start + len)` a non-wrapping range inside the user half? Checking
+/// this before touching the page table is what keeps a garbage pointer passed by
+/// a user program from turning into a kernel-side load/store fault.
+/// The explicit bound also rejects the two's-complement bit pattern of a
+/// negative `isize`, which a test may hand us as a "bogus" address.
+fn in_user_range(start: usize, len: usize) -> bool {
+    if start >= USER_VA_LIMIT {
+        return false;
+    }
+    match start.checked_add(len) {
+        Some(end) => end <= USER_VA_LIMIT,
+        None => false,
+    }
+}
+
+/// Copy one byte out of the address space selected by `token`.
+/// `None` means "not readable": unmapped, invalid, outside user space, or a page
+/// whose R bit is clear — exactly the cases `sys_trace(Read)` must report as an
+/// error instead of dereferencing.
+pub fn read_user_byte(token: usize, va: usize) -> Option<u8> {
+    if !in_user_range(va, 1) {
+        return None;
+    }
+    let page_table = PageTable::from_token(token);
+    let virt_va: VirtAddr = va.into();
+    let (ppn, flags) = page_table.fetch_frame(virt_va)?;
+    if (flags & PTEFlags::R) == PTEFlags::empty() {
+        return None;
+    }
+    // The offset inside the frame has to be added back: ppn alone points at byte
+    // 0 of the page, which is how an earlier attempt wrote the TimeVal fields to
+    // the wrong address and left the caller's struct at zero.
+    Some(ppn.get_bytes_array()[virt_va.page_offset()])
+}
+
+/// Store one byte into the address space selected by `token`, refusing a target
+/// that is not both writable and valid. Returns whether the byte landed.
+pub fn write_user_byte(token: usize, va: usize, byte: u8) -> bool {
+    if !in_user_range(va, 1) {
+        return false;
+    }
+    let page_table = PageTable::from_token(token);
+    let virt_va: VirtAddr = va.into();
+    let (ppn, flags) = match page_table.fetch_frame(virt_va) {
+        Some(frame) => frame,
+        None => return false,
+    };
+    if (flags & (PTEFlags::R | PTEFlags::W)) != (PTEFlags::R | PTEFlags::W) {
+        return false;
+    }
+    ppn.get_bytes_array()[virt_va.page_offset()] = byte;
+    true
+}
+
+/// Write `src` into the user address space, page chunk by page chunk so a buffer
+/// straddling a page boundary (the HINT about a split `TimeVal`) still works.
+/// Every page of the range must be valid, readable and writable; otherwise
+/// nothing beyond the failing chunk is written and the call reports `false`.
+pub fn write_user_bytes(token: usize, va: usize, src: &[u8]) -> bool {
+    let len = src.len();
+    if len == 0 || !in_user_range(va, len) {
+        return false;
+    }
+    let page_table = PageTable::from_token(token);
+    let mut done = 0;
+    while done < len {
+        let cursor = VirtAddr::from(va + done);
+        let (ppn, flags) = match page_table.fetch_frame(cursor) {
+            Some(ok) => ok,
+            None => return false,
+        };
+        if (flags & (PTEFlags::R | PTEFlags::W)) != (PTEFlags::R | PTEFlags::W) {
+            return false;
+        }
+        let page = ppn.get_bytes_array();
+        let chunk = (PAGE_SIZE - cursor.page_offset()).min(len - done);
+        let from = cursor.page_offset();
+        page[from..from + chunk].copy_from_slice(&src[done..done + chunk]);
+        done += chunk;
+    }
+    true
 }
 
 /// Translate&Copy a ptr[u8] array with LENGTH len to a mutable u8 Vec through page table

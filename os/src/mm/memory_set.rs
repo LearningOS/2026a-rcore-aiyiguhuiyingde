@@ -262,6 +262,50 @@ impl MemorySet {
             false
         }
     }
+    /// Do all pages of `[start_vpn, end_vpn)` currently have no mapping?
+    /// `sys_mmap` insists on it so a fresh region never silently replaces the
+    /// ELF image, the user stack or a previous mapping.
+    pub fn is_free_range(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
+        (start_vpn.0..end_vpn.0).all(|raw| !self.page_table.is_mapped(VirtPageNum(raw)))
+    }
+    /// Do all pages of `[start_vpn, end_vpn)` currently have a mapping?
+    /// `sys_munmap` uses it to reject a range the task does not fully own.
+    pub fn is_live_range(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
+        (start_vpn.0..end_vpn.0).all(|raw| self.page_table.is_mapped(VirtPageNum(raw)))
+    }
+    /// Tear down every `MapArea` that lies completely inside the range and clear
+    /// its PTEs; dropping the area drops its `FrameTracker`s, which returns the
+    /// frames to the frame allocator. An area only *partly* covered means the
+    /// caller crossed the border of something it does not own, so nothing is
+    /// removed and the answer is `false`.
+    pub fn drop_areas_in(&mut self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
+        let straddles = |area: &MapArea| {
+            let l = area.vpn_range.get_start().0;
+            let r = area.vpn_range.get_end().0;
+            let overlaps = l < end_vpn.0 && start_vpn.0 < r;
+            let inside = l >= start_vpn.0 && r <= end_vpn.0;
+            overlaps && !inside
+        };
+        if self.areas.iter().any(straddles) {
+            return false;
+        }
+        let mut victims: Vec<usize> = Vec::new();
+        for (index, area) in self.areas.iter().enumerate() {
+            let l = area.vpn_range.get_start().0;
+            let r = area.vpn_range.get_end().0;
+            if l >= start_vpn.0 && r <= end_vpn.0 && l < r {
+                victims.push(index);
+            }
+        }
+        for index in victims.iter().rev() {
+            let area = self.areas.remove(*index);
+            for vpn in area.vpn_range {
+                self.page_table.unmap(vpn);
+            }
+            // frames go away with `area` here
+        }
+        !victims.is_empty()
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {

@@ -15,6 +15,7 @@ mod switch;
 mod task;
 
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{MapPermission, VirtAddr};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
@@ -133,6 +134,62 @@ impl TaskManager {
         inner.tasks[cur].change_program_brk(size)
     }
 
+    /// Add one to the current task's counter for syscall `id`.
+    /// Called by the trap handler *before* dispatch so that a syscall reading
+    /// its own id already sees the invocation in progress.
+    fn bump_syscall_count(&self, id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        let counter = &mut inner.tasks[cur].syscall_counter;
+        if id < counter.len() {
+            counter[id] += 1;
+        }
+    }
+
+    /// Current task's invocation count for syscall `id`; `None` when `id` is not
+    /// a counter we keep, which user_lib reports as an error rather than zero.
+    fn syscall_count(&self, id: usize) -> Option<usize> {
+        let inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur].syscall_counter.get(id).copied()
+    }
+
+    /// Map `[start_va, end_va)` of anonymous pages into the current task.
+    /// Refuses (without touching anything) when the range still holds a mapping,
+    /// so `sys_mmap` can answer `-1` instead of tripping the "already mapped"
+    /// assertion inside `PageTable::map`. Returns `0` on success, `-1` otherwise.
+    fn map_anonymous_range(&self, start_va: VirtAddr, end_va: VirtAddr, perm: MapPermission) -> isize {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        let memory_set = &mut inner.tasks[cur].memory_set;
+        if !memory_set.is_free_range(start_vpn, end_vpn) {
+            return -1;
+        }
+        memory_set.insert_framed_area(start_va, end_va, perm);
+        0
+    }
+
+    /// Unmap `[start_va, end_va)` from the current task; `-1` when any page is
+    /// not currently mapped or when the range cuts across an area the task does
+    /// not fully own — in both cases the address space stays as it was.
+    fn unmap_range(&self, start_va: VirtAddr, end_va: VirtAddr) -> isize {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        let memory_set = &mut inner.tasks[cur].memory_set;
+        if !memory_set.is_live_range(start_vpn, end_vpn) {
+            return -1;
+        }
+        if memory_set.drop_areas_in(start_vpn, end_vpn) {
+            0
+        } else {
+            -1
+        }
+    }
+
     /// Switch current `Running` task to the task we have found,
     /// or there is no `Ready` task and we can exit with all applications completed
     fn run_next_task(&self) {
@@ -201,4 +258,30 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Account one invocation of syscall `id` to the current task.
+pub fn record_task_syscall(id: usize) {
+    TASK_MANAGER.bump_syscall_count(id);
+}
+
+/// How many times has the current task invoked syscall `id`?
+pub fn count_task_syscall(id: usize) -> Option<usize> {
+    TASK_MANAGER.syscall_count(id)
+}
+
+/// Map anonymous pages into the current task; `0` on success, `-1` when the
+/// request overlaps something already mapped.
+pub fn map_pages_of_current_task(
+    start_va: VirtAddr,
+    end_va: VirtAddr,
+    perm: MapPermission,
+) -> isize {
+    TASK_MANAGER.map_anonymous_range(start_va, end_va, perm)
+}
+
+/// Unmap `[start_va, end_va)` of the current task; `0` on success, `-1` if the
+/// range is not fully owned by a single mapping.
+pub fn unmap_pages_of_current_task(start_va: VirtAddr, end_va: VirtAddr) -> isize {
+    TASK_MANAGER.unmap_range(start_va, end_va)
 }
