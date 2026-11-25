@@ -54,6 +54,7 @@ lazy_static! {
         let mut tasks = [TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
+            syscall_counts: [0; crate::config::SYSCALL_COUNT_SLOTS],
         }; MAX_APP_NUM];
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
@@ -115,6 +116,29 @@ impl TaskManager {
             .find(|id| inner.tasks[*id].task_status == TaskStatus::Ready)
     }
 
+    /// Id of the task that is currently `Running`.
+    fn current_task_id(&self) -> usize {
+        self.inner.exclusive_access().current_task
+    }
+
+    /// Bump the syscall histogram of the currently `Running` task.
+    fn record_current_syscall(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].record_syscall(syscall_id);
+    }
+
+    /// Read the syscall histogram of the currently `Running` task.
+    ///
+    /// `None` means "this id is not tracked" (out of range). An unstarted task
+    /// is not distinguished here: ch3 pre-creates every TCB at boot, so a task
+    /// that never ran honestly reports zero counts.
+    fn get_current_syscall_count(&self, syscall_id: usize) -> Option<isize> {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].get_syscall_count(syscall_id)
+    }
+
     /// Switch current `Running` task to the task we have found,
     /// or there is no `Ready` task and we can exit with all applications completed
     fn run_next_task(&self) {
@@ -168,4 +192,21 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+/// Count one syscall invocation for the current task. Called from the trap
+/// dispatcher, *before* dispatching, so that `sys_trace` counts itself too.
+pub fn record_syscall(syscall_id: usize) {
+    TASK_MANAGER.record_current_syscall(syscall_id)
+}
+
+/// Query how many times the current task has invoked `syscall_id`.
+pub fn get_syscall_count(syscall_id: usize) -> Option<isize> {
+    TASK_MANAGER.get_current_syscall_count(syscall_id)
+}
+
+/// Id of the task that is currently `Running`, used by the tracer to report
+/// which fixed app window it just dereferenced an address through.
+pub fn current_task_id() -> usize {
+    TASK_MANAGER.current_task_id()
 }

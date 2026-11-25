@@ -15,7 +15,7 @@
 mod context;
 
 use crate::syscall::syscall;
-use crate::task::{exit_current_and_run_next, suspend_current_and_run_next};
+use crate::task::{exit_current_and_run_next, record_syscall, suspend_current_and_run_next};
 use crate::timer::set_next_trigger;
 use core::arch::global_asm;
 use riscv::register::{
@@ -53,6 +53,13 @@ pub fn trap_handler(cx: &mut TrapContext) -> &mut TrapContext {
         Trap::Exception(Exception::UserEnvCall) => {
             // jump to next instruction anyway
             cx.sepc += 4;
+            // Bookkeeping for `sys_trace(Syscall, ..)` goes here rather than in
+            // each `sys_*` handler: this is the single choke point every user
+            // syscall passes through, so nothing can be missed and no handler
+            // needs to know it is being counted. It runs *before* dispatching,
+            // which is what makes `sys_trace` count itself too; the reader is
+            // the one that discounts the in-flight request.
+            record_syscall(cx.x[17]);
             // get system call return value
             cx.x[10] = syscall(cx.x[17], [cx.x[10], cx.x[11], cx.x[12]]) as usize;
         }

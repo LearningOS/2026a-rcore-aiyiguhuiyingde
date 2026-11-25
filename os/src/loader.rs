@@ -46,11 +46,41 @@ impl UserStack {
     fn get_sp(&self) -> usize {
         self.data.as_ptr() as usize + USER_STACK_SIZE
     }
+    /// `[bottom, top)` of this stack slot.
+    fn bounds(&self) -> (usize, usize) {
+        let bottom = self.data.as_ptr() as usize;
+        (bottom, bottom + USER_STACK_SIZE)
+    }
 }
 
 /// Get base address of app i.
 fn get_base_i(app_id: usize) -> usize {
     APP_BASE_ADDRESS + app_id * APP_SIZE_LIMIT
+}
+
+/// Does `addr..addr + len` sit inside memory that app `app_id` legitimately owns?
+///
+/// Chapter 3 has no page tables, so an app's memory is exactly two statically
+/// laid-out regions: the load window `[base_i, base_i + APP_SIZE_LIMIT)` that
+/// `build.rs` copies the ELF into, and the user stack slot `init_app_cx` pointed
+/// `sp` at. Anything else — the kernel image, a neighbour's window, a
+/// neighbour's stack — is refused, which is what keeps `sys_trace` from being an
+/// arbitrary physical-memory read/write primitive.
+///
+/// Asking about *this* app (rather than "some app") is deliberate: it is the
+/// ch3 stand-in for ch4's page-table walk, where the same query degrades to
+/// "is this address mapped in the current address space".
+pub fn is_valid_app_addr(app_id: usize, addr: usize, len: usize) -> bool {
+    if len == 0 || app_id >= get_num_app() {
+        return false;
+    }
+    let Some(end) = addr.checked_add(len) else {
+        return false;
+    };
+    let base = get_base_i(app_id);
+    let (stack_bottom, stack_top) = USER_STACK[app_id].bounds();
+    (base <= addr && end <= base + APP_SIZE_LIMIT)
+        || (stack_bottom <= addr && end <= stack_top)
 }
 
 /// Get the total number of applications.

@@ -19,3 +19,10 @@ pub const APP_SIZE_LIMIT: usize = 0x20000;
 pub const CLOCK_FREQ: usize = 12500000;
 /// the physical memory end
 pub const MEMORY_END: usize = 0x88000000;
+
+/// Number of per-task syscall-counter slots.
+///
+/// Sized to cover the largest syscall id used by the test apps (`SYSCALL_TRACE`
+/// = 410, `SYSCALL_THREAD_CREATE` = 460 in later chapters) with a little head
+/// room, so that the table never needs a heap or a lookup indirection.
+pub const SYSCALL_COUNT_SLOTS: usize = 512;
