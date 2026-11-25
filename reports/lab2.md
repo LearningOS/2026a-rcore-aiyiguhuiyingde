@@ -39,7 +39,7 @@ match sys_get_time(&mut time, 0) {
 }
 ```
 
-非 0 就永远得到 `-1`，于是 `sleep` 的 `while get_time() < start + period_ms`（`lib.rs:265`）
+非 0 就永远得到 `-1`，于是 `sleep` 的 `while get_time() < start + period_ms`（`ci-user/user/src/lib.rs:265`）
 恒成立，用户态变成无限 `sys_yield` 打转；整套 usertest 会一直卡到判分 Makefile
 的那条 30 秒 `timeout`（`overwrite/Makefile-ch6:23`，见 lab1 §1）把 qemu 杀掉为止。
 顺带可见用户态只认 `sec` 的低 16 位，所以内核写回的 `sec` 只要如实递增就够用。
@@ -61,16 +61,19 @@ match sys_get_time(&mut time, 0) {
 差别不在取整规则（两处都要向上取整），而在**区间是否已被占用**，见下一节。
 
 「可写必可读」不是洁癖：SV39 的 `PTEFlags` 里 `W` 位脱离 `R` 位没有意义，
-`ch4_mmap2`（`prot = 2`）就是专门用来把这条逼出来的测例——它先
-`assert_eq!(0, mmap(start, len, 2))`，一旦内核真给了一个只写页，它就会继续往下走、
-一路打印到 `Should cause error, Test 04_3 fail!`；我们返回 `-1`，
-它的断言当场 panic，那行文案不会出现。`ch4_mmap1`（`prot = 1`）相反：
+`ch4_mmap2`（`prot = 2`，`ci-user/user/src/bin/ch4_mmap2.rs:17`）就是专门用来把这条逼出来的测例——它先
+`assert_eq!(0, mmap(start, len, prot))`，一旦内核真给了一个只写页，它就会继续往下走、
+一路打印到 `Should cause error, Test 04_2 fail!`（`ch4_mmap2.rs:24`，测例自己的编号笔误，
+判分的 `NOT_EXPECTED` 里 04_2、04_3 两条都列着）；我们返回 `-1`，
+它的断言当场 panic，那行文案不会出现——`c_ch6_final.log` 第 475 行
+`Panicked at src/bin/ch4_mmap2.rs:18` 就是这条断言留下的痕迹。`ch4_mmap1`（`prot = 1`）相反：
 只读映射必须成功返回 `0`，随后那次写要真的陷入页故障、进程被杀，
 同样不许它打印 `Should cause error, Test 04_2 fail!`。
 一个测例要求拒绝、一个要求接受，靠 `perm_from_prot` 里那两个分支就能分开。
 
-要说清楚的是判分范围：这两行文案只出现在 `ch4.py` 的 `NOT_EXPECTED_4` 里，
-`ch6.py` 用的是 `NOT_EXPECTED_4b`（只有 `FAIL: T.T` 与 `Test sbrk failed!`），
+要说清楚的是判分范围：这两行文案只出现在 `check/ch4.py:27`、`:30` 的 `NOT_EXPECTED_4` 里，
+`ch6.py:22` 用的否定集是 `NOT_EXPECTED_4b`（定义在 `check/ch4b.py:10-13`，
+= `NOT_EXPECTED_2b` + `Test sbrk failed!`，实测就是 `FAIL: T.T` 与 `Test sbrk failed!` 两项），
 所以本章不判它们，本篇的实现是**按第四章的口径**保持正确的，而不是钻本章的空子。
 
 ## 3. `sys_mmap`：重叠一律判失败
@@ -81,6 +84,11 @@ match sys_get_time(&mut time, 0) {
 if !inner.memory_set.span_is_free(from_va, to_va) { return -1; }
 inner.memory_set.insert_framed_area(from_va, to_va, perm);
 ```
+
+成功时答案是 `0`，不是映射地址——所有 mmap 测例写的都是
+`assert_eq!(0, mmap(start, len, prot))`（`ci-user/user/src/bin/ch4_mmap0.rs:18`、
+`ch4_mmap2.rs:18`、`ch4_unmap.rs:18`）。
+本内核不替用户挑地址：`start` 由调用方给定，内核只需回答「映射成了」或「不给映射」。
 
 `insert_framed_area`（`memory_set.rs:58`）继承的是骨架「假定无冲突」的语义，
 `MapArea::map_one` 在 `Framed` 分支里对已有条目 `data_frames.insert()`，

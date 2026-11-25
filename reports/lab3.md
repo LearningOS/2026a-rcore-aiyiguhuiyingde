@@ -98,21 +98,28 @@ child_pid as isize
 
 ## 5. 实测读数
 
-同一次 qemu 运行里（`oscamp2/logs/c_ch6_link1.log`），本篇相关的输出依次是：
+同一次 qemu 运行里（`oscamp2/logs/c_ch6_final.log`；`OK` 后面那串数字是 `randomize`
+每轮注入的 token，本轮为 32106），本篇相关的输出依次是：
 
 ```
 488: Usertests: Running ch5b_exit           494: exit pass.
 496: Usertests: Running ch5b_forktest_simple
 500: hello child process!                   501: child process pid = 2, exit code = 100
-649: Usertests: Running ch5_spawn0          730: Test spawn0 OK!
-732: Usertests: Running ch5_spawn1          734: Test wait OK!    735: Test waitpid OK!
+649: Usertests: Running ch5_spawn0          730: Test spawn0 OK32106!
+732: Usertests: Running ch5_spawn1          734: Test wait OK32106!   735: Test waitpid OK32106!
 ```
 
 `ch5b_forktest` 的 `forktest pass.` 在 584 行（40 个 fork 之后）。
-判分侧对应 774/780/782/791/794/797/798 七行 `[PASS]`。
+判分侧的 `[PASS]` 从 770 行连续打到 800 行，共 31 行，与 802 行
+`Test passed: 31/31` 一一对应；本篇机制对应其中的 774（waitpid）、787（exit pass）、
+788（spawn0）、789（child process pid）、792（wait）、794（forktest）、797（hello child）。
+`ch6.py:5` 的 `EXPECTED_6` 是 `list(set(...))`，`[PASS]` 的先后与行号因此每轮都可能挪动，
+这几行只在本轮日志里成立——测例输出的行号（488-735）才是稳定的。
 
 27 个子测例（日志里 `Usertests: Running ch` 共 27 行）串在 `ch6_usertest` 的
 `spawn` + `waitpid(pid[i])` 循环里，整套在 `overwrite/Makefile-ch6:23` 的
 `timeout --foreground 30s qemu-system-riscv64` 之内自然结束：
-日志里 `Error 124`（timeout 杀掉子进程时 make 会打的返回码）出现 0 次，
-也没有 `panic`。
+日志里 `Error 124`（timeout 杀掉子进程时 make 会打的返回码）出现 0 次。
+整份日志只有两处 `Panicked`，都在设计之内：475 行是 `ch4_mmap2.rs:18` 那条
+「只写映射必须被拒」的断言，764 行是内核在所有应用结束后主动收场
+（`src/task/mod.rs:72` 的 `panic!("All applications completed!")`）。

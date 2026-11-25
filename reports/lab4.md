@@ -206,4 +206,6 @@ fn stat(&self) -> Option<Stat> { None }
 778/793/795: [PASS] found <Test link …> / <Test fstat …> / <Test mass open/unlink …>
 ```
 
-`Test passed21749: 31/31`，`MAKE_RC` 在报告补齐后为 0（`oscamp2/logs/c_ch6_final.log`）。
+同一份日志 802 行是 `Test passed21749: 31/31`。报告补齐后又跑了一轮
+（`oscamp2/logs/c_ch6_final.log`，`randomize` 把 token 换成 32106，743-760 行除 token 外一字不差），
+该轮 802 行仍是 31/31、809 行 `MAKE_RC=0`。

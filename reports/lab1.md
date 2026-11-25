@@ -5,7 +5,7 @@
 | 分支 | `ch6`（`Initialize ch6` 之上的实现） |
 | 主题 | easy-fs 的磁盘布局、块缓存、`OSInode`/`File` 抽象、`open`/`read`/`write`/`close` |
 | 判分口径 | `EXPECTED_6` 中的 `Test file0 OK!`、`file_test passed!`；全套 27 个子测例不得回归 |
-| 本轮读数 | `Test passed21749: 31/31`（`oscamp2/logs/c_ch6_final.log`） |
+| 本轮读数 | `Test passed32106: 31/31`、`MAKE_RC=0`（`oscamp2/logs/c_ch6_final.log:802`、`:809`）。判分 Makefile 的 `randomize` 每轮重新采样尾部数字，所以换一轮日志，`OK` 后面的 token 就换一个 |
 
 ## 1. 磁盘镜像是谁生成的
 
@@ -24,13 +24,16 @@ f.set_len(14000 * 512).unwrap();
 let efs = EasyFileSystem::create(block_file.clone(), 14000, 1);
 ```
 
-日志 `oscamp2/logs/c_ch6_link1.log:175` 记下了实际那条命令——
+日志 `oscamp2/logs/c_ch6_final.log:175` 记下了实际那条命令——
 `easy-fs-fuse -s ../ci-user/user/build/elf -o ../ci-user/user/build/fs.img`，
-紧跟着 179-230 行是 `root_inode.ls()` 回打的 **52 个**目录项（`ch2b_*` 到 `ch6b_*` 全套 ELF），
-即第一次挂载时根目录 `size = 52 * 32 = 1664` 字节、占 4 个数据块。
+`-o` 直接点名镜像文件；仓库那份收的是 `-t` 目标目录，再自己拼上死名字 `fs.img`
+（`main.rs:42-47`、`:57`）。命令后面 179-230 行是 `root_inode.ls()` 回打的 **52 个**目录项
+（`ch2b_*` 到 `ch6b_*` 全套 ELF），即第一次挂载时根目录 `size = 52 * 32 = 1664` 字节、占 4 个数据块。
 运行内核用的 Makefile 也是覆盖出来的那份：`overwrite/Makefile-ch6:12-15` 的 `fsimg`
-目标 + `:23` 的 `timeout --foreground 30s qemu-system-riscv64` +
-`:28-29` 的 virtio-blk 挂载；仓库里 `os/Makefile:75` 那个不带盘的 `run` 目标在判分时不会被用到。
+目标 + `:23` 的 `timeout --foreground 30s qemu-system-riscv64` + `:27-29` 的
+`-kernel` 与 virtio-blk 挂载。仓库的 `os/Makefile:74-81` 同样挂盘，区别只在于它不带
+30 秒 `timeout`、用 `-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA)` 装载裸二进制，
+而判分时仓库这一份整个被覆盖、根本不会被执行——那道 30 秒限时是判分脚本给的。
 
 所以真正要紧的是：**`EasyFileSystem::create` 是被两套调用共同使用的同一个函数**，
 签名 `(block_device, total_blocks, inode_bitmap_blocks)` 不能动；
@@ -152,5 +155,7 @@ sys_read / sys_write            os/src/syscall/fs.rs
 | `ch6_file0` | `open(CREATE\|WRONLY) > 0`、写、`close`、再 `open(RDONLY)` 读回 `"Hello, world!"` | 两次 open 的独立 offset；`close` 只丢 `Arc` |
 
 同一轮 `make test CHAPTER=6` 里，这两个测例分别打印
-`file_test passed21749!`（日志第 541 行）与 `Test file0 OK21749!`（第 544 行），
-`ch6_usertest` 的 27 个子测例全部跑完、无 `panic`、无 30 秒超时。
+`file_test passed32106!`（`c_ch6_final.log` 第 738 行）与 `Test file0 OK32106!`（第 741 行），
+`ch6_usertest` 的 27 个子测例全部跑完、30 秒内自然结束。整份日志只有两处 `Panicked`，
+都是设计内的：475 行是 `ch4_mmap2.rs:18` 那条「只写映射必须被拒」的断言，
+764 行是内核在所有应用结束后主动收场（`os/src/task/mod.rs:72`），判分口径不看它们。
